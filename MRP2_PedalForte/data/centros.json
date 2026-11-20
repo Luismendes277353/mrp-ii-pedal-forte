@@ -1,0 +1,17 @@
+{
+    "CT-01": {
+        "descricao": "Solda e Pintura de Quadros",
+        "capacidade_semanal": 24.0,
+        "custo_hora": 30.0
+    },
+    "CT-02": {
+        "descricao": "Montagem de Rodas",
+        "capacidade_semanal": 30.0,
+        "custo_hora": 32.0
+    },
+    "CT-03": {
+        "descricao": "Montagem Final",
+        "capacidade_semanal": 16.0,
+        "custo_hora": 40.0
+    }
+}

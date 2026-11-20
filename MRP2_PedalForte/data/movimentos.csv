@@ -1,0 +1,13 @@
+data;codigo;tipo;quantidade;saldo_apos;documento
+01/10/2026;PA-001;ENTRADA;5.0;5.0;Saldo Inicial Demo
+01/10/2026;PA-002;ENTRADA;4.0;4.0;Saldo Inicial Demo
+01/10/2026;SA-010;ENTRADA;12.0;12.0;Saldo Inicial Demo
+01/10/2026;SA-020;ENTRADA;40.0;40.0;Saldo Inicial Demo
+01/10/2026;MP-100;ENTRADA;90.0;90.0;Saldo Inicial Demo
+01/10/2026;MP-101;ENTRADA;25.0;25.0;Saldo Inicial Demo
+01/10/2026;MP-200;ENTRADA;60.0;60.0;Saldo Inicial Demo
+01/10/2026;MP-201;ENTRADA;1500.0;1500.0;Saldo Inicial Demo
+01/10/2026;MP-202;ENTRADA;18.0;18.0;Saldo Inicial Demo
+01/10/2026;MP-300;ENTRADA;30.0;30.0;Saldo Inicial Demo
+01/10/2026;MP-301;ENTRADA;15.0;15.0;Saldo Inicial Demo
+01/10/2026;MP-302;ENTRADA;20.0;20.0;Saldo Inicial Demo
