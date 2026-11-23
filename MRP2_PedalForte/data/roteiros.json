@@ -1,18 +1,26 @@
 {
-    "PA-001": {
-        "centro": "CT-03",
-        "tempo_unitario": 0.5
-    },
-    "PA-002": {
-        "centro": "CT-03",
-        "tempo_unitario": 0.4
-    },
-    "SA-010": {
-        "centro": "CT-01",
-        "tempo_unitario": 0.5
-    },
-    "SA-020": {
-        "centro": "CT-02",
-        "tempo_unitario": 0.25
-    }
+  "SA-010": {
+    "centro": "CT-01",
+    "tempo_unitario": 1.2
+  },
+  "SA-030": {
+    "centro": "CT-01",
+    "tempo_unitario": 1.0
+  },
+  "SA-020": {
+    "centro": "CT-02",
+    "tempo_unitario": 0.8
+  },
+  "SA-040": {
+    "centro": "CT-02",
+    "tempo_unitario": 0.7
+  },
+  "PA-001": {
+    "centro": "CT-03",
+    "tempo_unitario": 0.5
+  },
+  "PA-002": {
+    "centro": "CT-03",
+    "tempo_unitario": 0.4
+  }
 }

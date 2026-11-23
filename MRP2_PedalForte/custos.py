@@ -1,103 +1,130 @@
-from persistencia import carregar_json, salvar_json
+"""Custo padrao dos itens fabricados - materiais + mao de obra (RF13).
+
+O custo e calculado de forma recursiva, percorrendo a estrutura de produto:
+
+    custo(MP)       = custo unitario cadastrado
+    custo(PA ou SA) = soma(quantidade x custo(componente)) + mao de obra
+    mao de obra     = tempo unitario do roteiro x custo-hora do centro
+"""
+
+from estrutura import componentes_de
+from itens import eh_fabricado, listar_itens, obter_item
+from utils import (
+    ErroNegocio,
+    formatar_moeda,
+    formatar_numero,
+    montar_tabela,
+)
 
 
-def calcular_custo_unitario_recursivo(
-    codigo: str,
-    itens: dict,
-    estrutura: dict,
-    centros: dict,
-    roteiros: dict,
-) -> float:
-    item = itens[codigo]
-
-    if item["tipo"] == "MP":
-        return float(item["custo_unitario"])
-
-    custo_materiais = 0.0
-    for filho in estrutura.get(codigo, []):
-        comp = filho["componente"]
-        qtd = filho["quantidade"]
-        custo_comp = calcular_custo_unitario_recursivo(
-            comp, itens, estrutura, centros, roteiros
-        )
-        custo_materiais += qtd * custo_comp
-
-    custo_mao_obra = 0.0
-    roteiro = roteiros.get(codigo)
-    if roteiro:
-        ct = centros.get(roteiro["centro"])
-        if ct:
-            custo_mao_obra = roteiro["tempo_unitario"] * ct["custo_hora"]
-
-    return round(custo_materiais + custo_mao_obra, 2)
+def mao_de_obra(dados, codigo):
+    """Mao de obra direta do item (None se nao houver roteiro)."""
+    roteiro = dados["roteiros"].get(codigo)
+    if roteiro is None:
+        return None
+    centro = dados["centros"].get(roteiro["centro"])
+    if centro is None:
+        raise ErroNegocio(
+            f"o roteiro de {codigo} usa o centro {roteiro['centro']}, que "
+            "nao esta cadastrado.")
+    return {
+        "centro": centro["codigo"],
+        "horas": roteiro["tempo_unitario"],
+        "custo_hora": centro["custo_hora"],
+        "valor": round(roteiro["tempo_unitario"] * centro["custo_hora"], 2),
+    }
 
 
-def atualizar_todos_custos_padrao() -> dict[str, float]:
-    itens = carregar_json("itens")
-    estrutura = carregar_json("estrutura")
-    centros = carregar_json("centros")
-    roteiros = carregar_json("roteiros")
+def custo_padrao(dados, codigo):
+    """Custo padrao de um item, calculado recursivamente."""
+    item = obter_item(dados, codigo)
+    if not eh_fabricado(item):
+        return item["custo_unitario"]
+    total = 0.0
+    for linha in componentes_de(dados, item["codigo"]):
+        total += linha["quantidade"] * custo_padrao(dados,
+                                                    linha["componente"])
+    obra = mao_de_obra(dados, item["codigo"])
+    if obra:
+        total += obra["valor"]
+    return round(total, 2)
 
-    for codigo, dados in itens.items():
-        if dados["tipo"] in ("PA", "SA"):
-            dados["custo_unitario"] = calcular_custo_unitario_recursivo(
-                codigo, itens, estrutura, centros, roteiros
-            )
 
-    salvar_json("itens", itens)
-    return {cod: d["custo_unitario"] for cod, d in itens.items()}
+def detalhar_custo(dados, codigo):
+    """Composicao do custo padrao de um item fabricado.
+
+    Retorna ``{"item", "linhas", "mao_de_obra", "total"}`` onde cada linha
+    e um componente direto com seu custo unitario (padrao, se fabricado).
+    """
+    item = obter_item(dados, codigo)
+    if not eh_fabricado(item):
+        raise ErroNegocio(
+            f"{item['codigo']} e materia-prima: o custo e o unitario "
+            f"cadastrado (R$ {formatar_moeda(item['custo_unitario'])}).")
+    linhas = []
+    for linha in componentes_de(dados, item["codigo"]):
+        componente = obter_item(dados, linha["componente"])
+        unitario = custo_padrao(dados, componente["codigo"])
+        linhas.append({
+            "codigo": componente["codigo"],
+            "descricao": componente["descricao"],
+            "quantidade": linha["quantidade"],
+            "custo_unitario": unitario,
+            "total": round(linha["quantidade"] * unitario, 2),
+        })
+    return {"item": item, "linhas": linhas,
+            "mao_de_obra": mao_de_obra(dados, item["codigo"]),
+            "total": custo_padrao(dados, item["codigo"])}
 
 
-def exibir_custo_padrao() -> None:
-    itens = carregar_json("itens")
-    estrutura = carregar_json("estrutura")
-    centros = carregar_json("centros")
-    roteiros = carregar_json("roteiros")
+def formatar_custo(dados, codigo):
+    """Texto do custo padrao (mockup 6.7)."""
+    detalhe = detalhar_custo(dados, codigo)
+    item = detalhe["item"]
+    linhas = [
+        (c["codigo"], c["descricao"], formatar_numero(c["quantidade"]),
+         formatar_moeda(c["custo_unitario"]), formatar_moeda(c["total"]))
+        for c in detalhe["linhas"]
+    ]
+    obra = detalhe["mao_de_obra"]
+    if obra:
+        linhas.append(("Mao de obra", obra["centro"],
+                       f"{formatar_numero(obra['horas'])} h",
+                       formatar_moeda(obra["custo_hora"]),
+                       formatar_moeda(obra["valor"])))
+    saida = [f"CUSTO PADRAO - {item['codigo']} {item['descricao']}"]
+    tabela = montar_tabela(("Item", "Descricao", "Qtde", "Custo un.",
+                            "Total"), linhas, "<<>>>")
+    saida.extend(tabela)
+    saida.append("-" * max(len(t) for t in tabela))
+    saida.append(f"CUSTO PADRAO TOTAL R$ {formatar_moeda(detalhe['total'])}")
+    if not obra:
+        saida.append("Obs.: item sem roteiro - mao de obra nao considerada.")
+    return saida
 
-    codigo = input("Código do produto fabricado (ex.: PA-001): ").strip().upper()
-    if codigo not in itens:
-        print("ERRO: Item não encontrado.")
-        return
 
-    if itens[codigo]["tipo"] == "MP":
-        print(
-            f"{codigo} é Matéria-Prima. Custo unitário de compra: "
-            f"R$ {itens[codigo]['custo_unitario']:.2f}"
-        )
-        return
+def formatar_tabela_custos(dados):
+    """Custo padrao de todos os itens fabricados x custo cadastrado."""
+    linhas = []
+    for item in listar_itens(dados):
+        if eh_fabricado(item):
+            linhas.append((item["codigo"], item["descricao"],
+                           formatar_moeda(custo_padrao(dados,
+                                                       item["codigo"])),
+                           formatar_moeda(item["custo_unitario"])))
+    return montar_tabela(("Item", "Descricao", "Custo padrao (R$)",
+                          "Custo cadastrado (R$)"), linhas, "<<>>")
 
-    print(f"\nCUSTO PADRAO - {codigo} {itens[codigo]['descricao']}")
-    print(f"{'Item':<14} {'Descricao':<26} {'Qtde':>6} {'Custo un.':>10} {'Total':>10}")
-    print("-" * 70)
 
-    total_geral = 0.0
-    for filho in estrutura.get(codigo, []):
-        comp = filho["componente"]
-        qtd = filho["quantidade"]
-        custo_un = calcular_custo_unitario_recursivo(
-            comp, itens, estrutura, centros, roteiros
-        )
-        subtotal = qtd * custo_un
-        total_geral += subtotal
-        qtd_fmt = f"{qtd:g}".replace(".", ",")
-        print(
-            f"{comp:<14} {itens[comp]['descricao']:<26} "
-            f"{qtd_fmt:>6} {custo_un:>10.2f} {subtotal:>10.2f}"
-        )
+def atualizar_custos_unitarios(dados):
+    """Grava o custo padrao como custo unitario dos itens fabricados.
 
-    roteiro = roteiros.get(codigo)
-    if roteiro and roteiro["centro"] in centros:
-        ct_cod = roteiro["centro"]
-        tempo = roteiro["tempo_unitario"]
-        custo_h = centros[ct_cod]["custo_hora"]
-        subtotal_mo = tempo * custo_h
-        total_geral += subtotal_mo
-        tempo_fmt = f"{tempo:g} h".replace(".", ",")
-        print(
-            f"{'Mao de obra':<14} {ct_cod:<26} "
-            f"{tempo_fmt:>6} {custo_h:>10.2f} {subtotal_mo:>10.2f}"
-        )
-
-    print("-" * 70)
-    print(f"{'CUSTO PADRAO TOTAL':<58} R$ {total_geral:>8.2f}")
-    atualizar_todos_custos_padrao()
+    O calculo e recursivo a partir das MP, entao nao depende da ordem de
+    atualizacao. Retorna a quantidade de itens atualizados.
+    """
+    total = 0
+    for item in listar_itens(dados):
+        if eh_fabricado(item):
+            item["custo_unitario"] = custo_padrao(dados, item["codigo"])
+            total += 1
+    return total

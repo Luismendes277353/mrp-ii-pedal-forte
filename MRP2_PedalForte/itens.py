@@ -1,129 +1,134 @@
-from persistencia import carregar_json, salvar_json
+"""Cadastro de itens (RF02, RN01).
+
+Estrutura de cada item em ``dados["itens"][codigo]``::
+
+    {"codigo": "SA-020", "descricao": "...", "tipo": "SA", "unidade": "un",
+     "custo_unitario": 0.0, "lead_time": 1, "estoque_seguranca": 10.0,
+     "lote_minimo": 80.0}
+"""
+
 from utils import (
-    ler_float_positivo,
-    ler_int_positivo,
-    ler_texto_nao_vazio,
+    TIPOS_FABRICADOS,
+    TIPOS_ITEM,
+    ErroNegocio,
+    arredondar,
+    formatar_moeda,
+    formatar_numero,
+    montar_tabela,
     validar_codigo_item,
+    validar_numero,
+)
+
+CAMPOS_ALTERAVEIS = (
+    "descricao",
+    "unidade",
+    "custo_unitario",
+    "lead_time",
+    "estoque_seguranca",
+    "lote_minimo",
 )
 
 
-def cadastrar_item() -> None:
-    itens = carregar_json("itens")
-    estoque = carregar_json("estoque")
+def tipo_do_codigo(codigo):
+    """Extrai o tipo (PA, SA ou MP) do codigo do item."""
+    return codigo.split("-")[0]
 
-    while True:
-        codigo = input("Código do item (ex.: PA-003, SA-030, MP-400): ").strip().upper()
-        if not validar_codigo_item(codigo):
-            print("ERRO [RN01]: Código deve seguir o padrão PA-000, SA-000 ou MP-000.")
-            continue
-        if codigo in itens:
-            print(f"ERRO [RN01]: O código {codigo} já está cadastrado.")
-            return
-        break
 
-    tipo = codigo.split("-")[0]
-    descricao = ler_texto_nao_vazio("Descrição do item: ")
-    unidade = ler_texto_nao_vazio("Unidade de medida (ex.: un, m, L, kg): ")
+def eh_fabricado(item):
+    """PA e SA sao fabricados; MP e comprada (RN01)."""
+    return item["tipo"] in TIPOS_FABRICADOS
 
-    if tipo == "MP":
-        custo_unitario = ler_float_positivo("Custo unitário de compra (R$): ")
-    else:
-        print("Nota: Itens PA e SA têm custo padrão calculado pela BOM + Roteiro.")
-        custo_unitario = 0.0
 
-    lead_time = ler_int_positivo("Lead time (semanas): ", permitir_zero=False)
-    estoque_seguranca = ler_float_positivo("Estoque de segurança: ", permitir_zero=True)
-    lote_minimo = ler_float_positivo("Lote mínimo: ", permitir_zero=False)
+def obter_item(dados, codigo):
+    """Busca um item pelo codigo ou levanta ErroNegocio."""
+    codigo = str(codigo).strip().upper()
+    try:
+        return dados["itens"][codigo]
+    except KeyError:
+        raise ErroNegocio(f"item {codigo} nao cadastrado.") from None
 
-    itens[codigo] = {
+
+def _validar_campos(descricao, unidade, custo_unitario, lead_time,
+                    estoque_seguranca, lote_minimo):
+    """Valida e normaliza os campos de um item."""
+    descricao = str(descricao).strip()
+    unidade = str(unidade).strip()
+    if not descricao:
+        raise ErroNegocio("a descricao do item e obrigatoria.")
+    if not unidade:
+        raise ErroNegocio("a unidade de medida do item e obrigatoria.")
+    validar_numero(custo_unitario, "O custo unitario", minimo=0)
+    validar_numero(lead_time, "O lead time", minimo=0)
+    if int(lead_time) != lead_time:
+        raise ErroNegocio("o lead time deve ser um numero inteiro de semanas.")
+    validar_numero(estoque_seguranca, "O estoque de seguranca", minimo=0)
+    validar_numero(lote_minimo, "O lote minimo", minimo=0)
+    return {
         "descricao": descricao,
-        "tipo": tipo,
         "unidade": unidade,
-        "custo_unitario": custo_unitario,
-        "lead_time": lead_time,
-        "estoque_seguranca": estoque_seguranca,
-        "lote_minimo": lote_minimo,
+        "custo_unitario": arredondar(custo_unitario),
+        "lead_time": int(lead_time),
+        "estoque_seguranca": arredondar(estoque_seguranca),
+        "lote_minimo": arredondar(lote_minimo),
     }
-    estoque[codigo] = 0.0
-
-    salvar_json("itens", itens)
-    salvar_json("estoque", estoque)
-    print(f"Item {codigo} - {descricao} cadastrado com sucesso!")
 
 
-def listar_itens() -> None:
-    itens = carregar_json("itens")
+def cadastrar_item(dados, codigo, descricao, unidade, custo_unitario,
+                   lead_time, estoque_seguranca, lote_minimo):
+    """Cadastra um novo item. O tipo e derivado do codigo (RN01)."""
+    codigo = validar_codigo_item(codigo)
+    if codigo in dados["itens"]:
+        raise ErroNegocio(f"ja existe um item com o codigo {codigo} (RN01).")
+    campos = _validar_campos(descricao, unidade, custo_unitario, lead_time,
+                             estoque_seguranca, lote_minimo)
+    item = {"codigo": codigo, "tipo": tipo_do_codigo(codigo)}
+    item.update(campos)
+    dados["itens"][codigo] = item
+    dados["estoque"].setdefault(codigo, 0.0)
+    return item
+
+
+def alterar_item(dados, codigo, alteracoes):
+    """Altera campos de um item existente.
+
+    Codigo e tipo nao podem ser alterados, pois a estrutura de produto e o
+    historico de estoque dependem deles.
+    """
+    item = obter_item(dados, codigo)
+    invalidos = set(alteracoes) - set(CAMPOS_ALTERAVEIS)
+    if invalidos:
+        raise ErroNegocio(
+            f"campos nao alteraveis: {', '.join(sorted(invalidos))}.")
+    novos = {campo: item[campo] for campo in CAMPOS_ALTERAVEIS}
+    novos.update(alteracoes)
+    item.update(_validar_campos(
+        novos["descricao"], novos["unidade"], novos["custo_unitario"],
+        novos["lead_time"], novos["estoque_seguranca"], novos["lote_minimo"]))
+    return item
+
+
+def listar_itens(dados, tipo=None):
+    """Lista de itens ordenada por tipo (PA, SA, MP) e codigo."""
+    if tipo is not None and tipo not in TIPOS_ITEM:
+        raise ErroNegocio(f"tipo '{tipo}' invalido. Use PA, SA ou MP.")
+    itens = [item for item in dados["itens"].values()
+             if tipo is None or item["tipo"] == tipo]
+    return sorted(itens, key=lambda i: (TIPOS_ITEM.index(i["tipo"]),
+                                        i["codigo"]))
+
+
+def formatar_itens(dados, tipo=None):
+    """Tabela de texto com os itens cadastrados."""
+    itens = listar_itens(dados, tipo)
     if not itens:
-        print("Nenhum item cadastrado.")
-        return
-
-    print("\n" + "=" * 88)
-    print(
-        f"{'CÓDIGO':<8} {'TIPO':<5} {'DESCRIÇÃO':<28} {'UN':<4} "
-        f"{'CUSTO(R$)':>10} {'LT':>4} {'EST.SEG':>8} {'LOTE MIN':>9}"
-    )
-    print("-" * 88)
-    for codigo in sorted(itens.keys()):
-        dados = itens[codigo]
-        print(
-            f"{codigo:<8} {dados['tipo']:<5} {dados['descricao']:<28} "
-            f"{dados['unidade']:<4} {dados['custo_unitario']:>10.2f} "
-            f"{dados['lead_time']:>4} {dados['estoque_seguranca']:>8.1f} "
-            f"{dados['lote_minimo']:>9.1f}"
-        )
-    print("=" * 88)
-
-
-def alterar_item() -> None:
-    itens = carregar_json("itens")
-    codigo = input("Informe o código do item a alterar: ").strip().upper()
-
-    if codigo not in itens:
-        print("ERRO: Item não encontrado.")
-        return
-
-    item = itens[codigo]
-    print(f"\nEditando {codigo} - {item['descricao']} (Enter mantém o valor atual):")
-
-    nova_desc = input(f"Descrição [{item['descricao']}]: ").strip()
-    if nova_desc:
-        item["descricao"] = nova_desc
-
-    nova_un = input(f"Unidade [{item['unidade']}]: ").strip()
-    if nova_un:
-        item["unidade"] = nova_un
-
-    if item["tipo"] == "MP":
-        novo_custo = input(f"Custo unitário [{item['custo_unitario']:.2f}]: ").strip()
-        if novo_custo:
-            try:
-                valor = float(novo_custo.replace(",", "."))
-                if valor > 0:
-                    item["custo_unitario"] = valor
-            except ValueError:
-                print("Aviso: Custo inválido ignorado.")
-
-    novo_lt = input(f"Lead time (sem) [{item['lead_time']}]: ").strip()
-    if novo_lt.isdigit() and int(novo_lt) > 0:
-        item["lead_time"] = int(novo_lt)
-
-    novo_es = input(f"Estoque de segurança [{item['estoque_seguranca']}]: ").strip()
-    if novo_es:
-        try:
-            valor = float(novo_es.replace(",", "."))
-            if valor >= 0:
-                item["estoque_seguranca"] = valor
-        except ValueError:
-            print("Aviso: Estoque de segurança inválido ignorado.")
-
-    novo_lote = input(f"Lote mínimo [{item['lote_minimo']}]: ").strip()
-    if novo_lote:
-        try:
-            valor = float(novo_lote.replace(",", "."))
-            if valor > 0:
-                item["lote_minimo"] = valor
-        except ValueError:
-            print("Aviso: Lote mínimo inválido ignorado.")
-
-    salvar_json("itens", itens)
-    print(f"Item {codigo} atualizado com sucesso!")
+        return ["Nenhum item cadastrado."]
+    linhas = [
+        (i["codigo"], i["descricao"], i["tipo"], i["unidade"],
+         formatar_moeda(i["custo_unitario"]), i["lead_time"],
+         formatar_numero(i["estoque_seguranca"]),
+         formatar_numero(i["lote_minimo"]))
+        for i in itens
+    ]
+    cabecalho = ("Codigo", "Descricao", "Tipo", "Un", "Custo un.",
+                 "LT(sem)", "Est.Seg.", "Lote min.")
+    return montar_tabela(cabecalho, linhas, "<<<<>>>>")

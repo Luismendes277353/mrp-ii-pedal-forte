@@ -1,94 +1,65 @@
+"""Exportacao de relatorios em CSV (RF14).
+
+Os arquivos usam ponto e virgula como separador, virgula decimal e
+codificacao UTF-8 com BOM, para abrirem corretamente no Excel/LibreOffice
+em portugues.
+"""
+
 import csv
-import os
-from persistencia import carregar_json
+from pathlib import Path
 
-PASTA_RELATORIOS = "docs"
+import estoque
+import ordens
+from itens import obter_item
+from persistencia import PASTA_SAIDA
+from utils import ErroNegocio, formatar_data, formatar_numero
 
 
-def exportar_posicao_estoque_csv() -> str:
-    os.makedirs(PASTA_RELATORIOS, exist_ok=True)
-    itens = carregar_json("itens")
-    estoque = carregar_json("estoque")
-
-    caminho = os.path.join(PASTA_RELATORIOS, "posicao_estoque.csv")
-    with open(caminho, "w", newline="", encoding="utf-8-sig") as arquivo:
-        escritor = csv.writer(arquivo, delimiter=";")
-        escritor.writerow(
-            [
-                "codigo",
-                "tipo",
-                "descricao",
-                "unidade",
-                "saldo_atual",
-                "estoque_seguranca",
-                "custo_unitario",
-                "valor_total_estoque",
-                "status",
-            ]
-        )
-        for cod in sorted(itens.keys()):
-            item = itens[cod]
-            saldo = float(estoque.get(cod, 0.0))
-            es = float(item["estoque_seguranca"])
-            custo = float(item["custo_unitario"])
-            valor_total = round(saldo * custo, 2)
-            status = "ABAIXO_ES" if saldo < es else "OK"
-            escritor.writerow(
-                [
-                    cod,
-                    item["tipo"],
-                    item["descricao"],
-                    item["unidade"],
-                    saldo,
-                    es,
-                    custo,
-                    valor_total,
-                    status,
-                ]
-            )
+def _gravar_csv(caminho, cabecalho, linhas):
+    caminho = Path(caminho)
+    try:
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        with open(caminho, "w", encoding="utf-8-sig", newline="") as arquivo:
+            escritor = csv.writer(arquivo, delimiter=";")
+            escritor.writerow(cabecalho)
+            escritor.writerows(linhas)
+    except OSError as erro:
+        raise ErroNegocio(
+            f"nao foi possivel gravar {caminho.name}: {erro}") from erro
     return caminho
 
 
-def exportar_lista_ordens_csv() -> str:
-    os.makedirs(PASTA_RELATORIOS, exist_ok=True)
-    ordens = carregar_json("ordens", padrao=[])
-    itens = carregar_json("itens")
-
-    caminho = os.path.join(PASTA_RELATORIOS, "lista_ordens.csv")
-    with open(caminho, "w", newline="", encoding="utf-8-sig") as arquivo:
-        escritor = csv.writer(arquivo, delimiter=";")
-        escritor.writerow(
-            [
-                "numero",
-                "tipo",
-                "item",
-                "descricao_item",
-                "quantidade",
-                "semana_liberacao",
-                "semana_entrega",
-                "status",
-            ]
-        )
-        for ordem in ordens:
-            desc = itens.get(ordem["item"], {}).get("descricao", "")
-            escritor.writerow(
-                [
-                    ordem["numero"],
-                    ordem["tipo"],
-                    ordem["item"],
-                    desc,
-                    ordem["quantidade"],
-                    ordem["semana_liberacao"],
-                    ordem["semana_entrega"],
-                    ordem["status"],
-                ]
-            )
-    return caminho
+def exportar_posicao_estoque(dados, pasta=PASTA_SAIDA):
+    """Exporta a posicao de estoque de todos os itens."""
+    cabecalho = ("codigo", "descricao", "tipo", "unidade", "saldo",
+                 "estoque_seguranca", "situacao", "custo_unitario",
+                 "valor_em_estoque")
+    linhas = []
+    for posicao in estoque.posicao_estoque(dados):
+        linhas.append((
+            posicao["codigo"], posicao["descricao"], posicao["tipo"],
+            posicao["unidade"], formatar_numero(posicao["saldo"]),
+            formatar_numero(posicao["estoque_seguranca"]),
+            posicao["situacao"],
+            formatar_numero(posicao["custo_unitario"], 2),
+            formatar_numero(posicao["valor"], 2)))
+    return _gravar_csv(Path(pasta) / "posicao_estoque.csv", cabecalho,
+                       linhas)
 
 
-def exportar_todos_relatorios() -> None:
-    arq_estoque = exportar_posicao_estoque_csv()
-    arq_ordens = exportar_lista_ordens_csv()
-    print("\nRelatórios exportados com sucesso:")
-    print(f"  - Posição de Estoque: {arq_estoque}")
-    print(f"  - Lista de Ordens:    {arq_ordens}")
+def exportar_ordens(dados, pasta=PASTA_SAIDA):
+    """Exporta a lista de ordens (OP e OC) com todos os status."""
+    cabecalho = ("ordem", "tipo", "item", "descricao", "quantidade",
+                 "unidade", "semana_liberacao", "semana_entrega", "status",
+                 "data_criacao", "data_encerramento")
+    linhas = []
+    for ordem in ordens.listar_ordens(dados):
+        item = obter_item(dados, ordem["item"])
+        linhas.append((
+            ordem["numero"], ordem["tipo"], ordem["item"],
+            item["descricao"], formatar_numero(ordem["quantidade"]),
+            item["unidade"], ordem["semana_liberacao"],
+            ordem["semana_entrega"], ordens.status_exibicao(ordem),
+            formatar_data(ordem["data_criacao"]),
+            formatar_data(ordem["data_encerramento"])))
+    return _gravar_csv(Path(pasta) / "ordens.csv", cabecalho, linhas)

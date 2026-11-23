@@ -1,204 +1,220 @@
-from persistencia import carregar_json, salvar_json
-from utils import obter_data_atual
+"""Calculo MRP (RF08, RF09, RN04 a RN08).
+
+O MRP processa os itens por tipo - primeiro os PA, depois os SA e por fim as
+MP (RN04) - de modo que, ao calcular um componente, as liberacoes planejadas
+de todos os seus pais ja estejam disponiveis.
+
+Resultado guardado em ``dados["mrp"]``::
+
+    {"executado_em": "2026-10-02",
+     "registros": {codigo: {"estoque_inicial": 40.0,
+                            "nb": [...], "rp": [...], "ep": [...],
+                            "nl": [...], "rpl": [...], "lib": [...]}},
+     "mensagens": ["..."]}
+
+Todas as listas possuem ``HORIZONTE`` (8) posicoes, uma por semana.
+"""
+
+import estrutura
+import mps
+import ordens
+from estoque import saldo
+from itens import listar_itens, obter_item
+from utils import (
+    HORIZONTE,
+    ErroNegocio,
+    arredondar,
+    formatar_data,
+    formatar_numero,
+    hoje_iso,
+    montar_tabela,
+)
+
+ORDEM_DE_PROCESSAMENTO = ("PA", "SA", "MP")  # RN04
 
 
-def _proximo_numero_ordem(ordens_existentes: list[dict], prefixo: str) -> int:
-    maior = 0
-    for ordem in ordens_existentes:
-        num_str = ordem.get("numero", "")
-        if num_str.startswith(f"{prefixo}-"):
-            try:
-                num = int(num_str.split("-")[1])
-                if num > maior:
-                    maior = num
-            except ValueError:
-                continue
-    return maior + 1
+def _zeros():
+    return [0.0] * HORIZONTE
 
 
-def calcular_mrp(
-    salvar_ordens: bool = True,
-) -> tuple[dict[str, dict], list[dict], list[str]]:
-    itens = carregar_json("itens")
-    estrutura = carregar_json("estrutura")
-    estoque = carregar_json("estoque")
-    mps = carregar_json("mps")
-    ordens_atuais = carregar_json("ordens", padrao=[])
+def calcular_registro(item, necessidade_bruta, recebimentos, estoque_inicial):
+    """Calcula o registro MRP de um item (RN05, RN06 e RN07).
 
-    ordens_mantidas = [
-        o for o in ordens_atuais if o.get("status") in ("FIRME", "LIBERADA", "ENCERRADA")
-    ]
+    Parametros:
+        item: dicionario do item (lead time, estoque de seguranca, lote).
+        necessidade_bruta: lista de HORIZONTE valores (NB).
+        recebimentos: lista de HORIZONTE valores (RP, recebimentos
+            programados de ordens firmes/liberadas).
+        estoque_inicial: saldo fisico atual (EP da semana 0).
 
-    seq_op = _proximo_numero_ordem(ordens_mantidas, "OP")
-    seq_oc = _proximo_numero_ordem(ordens_mantidas, "OC")
+    Retorna ``(registro, planejadas)`` onde ``planejadas`` e a lista de
+    tuplas ``(semana_entrega, semana_liberacao, quantidade)``; liberacoes
+    com semana < 1 correspondem a ordens atrasadas (RN07).
+    """
+    seguranca = item["estoque_seguranca"]
+    lote_minimo = item["lote_minimo"]
+    lead_time = item["lead_time"]
 
-    necessidade_bruta: dict[str, list[float]] = {
-        cod: [0.0] * 8 for cod in itens
-    }
+    registro = {"estoque_inicial": arredondar(estoque_inicial), "nb": [],
+                "rp": [], "ep": [], "nl": [], "rpl": [], "lib": _zeros()}
+    planejadas = []
+    ep_anterior = estoque_inicial
 
-    for cod, dados in itens.items():
-        if dados["tipo"] == "PA":
-            demanda_pa = (list(mps.get(cod, [0.0] * 8)) + [0.0] * 8)[:8]
-            necessidade_bruta[cod] = [float(v) for v in demanda_pa]
+    for semana in range(1, HORIZONTE + 1):
+        nb = necessidade_bruta[semana - 1]
+        rp = recebimentos[semana - 1]
+        # RN05: NL(t) = max(0, NB(t) + ES - (EP(t-1) + RP(t)))
+        nl = arredondar(max(0.0, nb + seguranca - (ep_anterior + rp)))
+        # RN06: recebimento planejado = max(NL, lote minimo)
+        rpl = arredondar(max(nl, lote_minimo)) if nl > 0 else 0.0
+        ep = arredondar(ep_anterior + rp + rpl - nb)
 
-    ordem_tipos = {"PA": 0, "SA": 1, "MP": 2}
-    itens_ordenados = sorted(
-        itens.keys(), key=lambda c: (ordem_tipos.get(itens[c]["tipo"], 9), c)
-    )
+        registro["nb"].append(arredondar(nb))
+        registro["rp"].append(arredondar(rp))
+        registro["ep"].append(ep)
+        registro["nl"].append(nl)
+        registro["rpl"].append(rpl)
 
-    registros_mrp: dict[str, dict] = {}
-    novas_ordens: list[dict] = []
-    mensagens_excecao: list[str] = []
+        if rpl > 0:
+            # RN07: liberacao = semana do recebimento - lead time
+            semana_liberacao = semana - lead_time
+            planejadas.append((semana, semana_liberacao, rpl))
+            if semana_liberacao >= 1:
+                registro["lib"][semana_liberacao - 1] = arredondar(
+                    registro["lib"][semana_liberacao - 1] + rpl)
+        ep_anterior = ep
+    return registro, planejadas
 
-    for cod in itens_ordenados:
-        item = itens[cod]
-        tipo = item["tipo"]
-        lead_time = int(item["lead_time"])
-        est_seg = float(item["estoque_seguranca"])
-        lote_min = float(item["lote_minimo"])
-        estoque_inicial = float(estoque.get(cod, 0.0))
 
-        nb = necessidade_bruta[cod]
-        rp = [0.0] * 8
-        ep = [0.0] * 8
-        nl = [0.0] * 8
-        rec_plan = [0.0] * 8
-        lib_plan = [0.0] * 8
+def _demanda_dependente(dados, codigo, liberacoes, mapa):
+    """Necessidade bruta de um componente a partir de seus pais (RN04).
 
-        for ordem in ordens_mantidas:
-            if ordem["item"] == cod and ordem["status"] in ("FIRME", "LIBERADA"):
-                sem_ent = int(ordem["semana_entrega"])
-                idx_ent = 0 if sem_ent < 1 else sem_ent - 1
-                if 0 <= idx_ent < 8:
-                    rp[idx_ent] += float(ordem["quantidade"])
+    Para cada pai: liberacoes planejadas x quantidade por unidade. Alem
+    disso, OPs FIRMES/LIBERADAS do pai ainda nao apontadas reservam os
+    componentes na semana de liberacao (ou na semana 1, se ja passou),
+    pois o consumo fisico so ocorre no apontamento (RF11).
+    """
+    nb = _zeros()
+    for pai, quantidade in mapa.get(codigo, []):
+        for indice, liberado in enumerate(liberacoes.get(pai, _zeros())):
+            nb[indice] += liberado * quantidade
+        for ordem in ordens.producoes_programadas(dados, pai):
+            semana = max(1, ordem["semana_liberacao"])
+            if semana <= HORIZONTE:
+                nb[semana - 1] += ordem["quantidade"] * quantidade
+    return [arredondar(valor) for valor in nb]
 
-        ep_anterior = estoque_inicial
 
-        for idx in range(8):
-            semana_atual = idx + 1
+def executar_mrp(dados, data_execucao=None):
+    """Executa o MRP para todos os itens e gera as ordens planejadas.
 
-            necessidade = nb[idx] + est_seg - (ep_anterior + rp[idx])
-            nl[idx] = round(max(0.0, necessidade), 4)
+    1. Apaga as ordens PLANEJADAS anteriores (RN08).
+    2. Processa PA, SA e MP, nessa ordem (RN04).
+    3. Gera OPs (itens fabricados) e OCs (materias-primas) com semanas de
+       liberacao e entrega (RF09), marcando as atrasadas (RN07).
 
-            if nl[idx] > 0:
-                rec_plan[idx] = max(nl[idx], lote_min)
+    Retorna um dicionario-resumo com as mensagens de excecao e as ordens
+    criadas.
+    """
+    data_execucao = data_execucao or hoje_iso()
+    apagadas = ordens.apagar_planejadas(dados)
+    mapa = estrutura.mapa_pais(dados)
+    liberacoes = {}
+    registros = {}
+    criadas = []
+    mensagens = []
+
+    for tipo in ORDEM_DE_PROCESSAMENTO:
+        for item in listar_itens(dados, tipo):
+            codigo = item["codigo"]
+            if tipo == "PA":
+                necessidade = mps.obter_plano(dados, codigo)
             else:
-                rec_plan[idx] = 0.0
+                necessidade = _demanda_dependente(dados, codigo, liberacoes,
+                                                  mapa)
+            registro, planejadas = calcular_registro(
+                item, necessidade,
+                ordens.recebimentos_programados(dados, codigo),
+                saldo(dados, codigo))
+            registros[codigo] = registro
+            liberacoes[codigo] = registro["lib"]
 
-            ep[idx] = round(ep_anterior + rp[idx] + rec_plan[idx] - nb[idx], 4)
-            ep_anterior = ep[idx]
+            tipo_ordem = "OC" if tipo == "MP" else "OP"
+            for entrega, liberacao, quantidade in planejadas:
+                ordem = ordens.criar_ordem(
+                    dados, tipo_ordem, codigo, quantidade, liberacao,
+                    entrega, data=data_execucao)
+                criadas.append(ordem)
+                if ordem["atrasada"]:
+                    mensagens.append(
+                        f"{ordem['numero']} ({codigo}): liberacao planejada "
+                        f"para a semana {liberacao}, antes da semana 1; "
+                        f"entrega na semana {entrega}. Ordem ATRASADA.")
 
-            if rec_plan[idx] > 0:
-                sem_liberacao = semana_atual - lead_time
-                if sem_liberacao >= 1:
-                    lib_plan[sem_liberacao - 1] += rec_plan[idx]
-                    status_ordem = "PLANEJADA"
-                else:
-                    status_ordem = "ATRASADA"
-
-                tipo_ordem = "OP" if tipo in ("PA", "SA") else "OC"
-                if tipo_ordem == "OP":
-                    numero_ordem = f"OP-{seq_op:04d}"
-                    seq_op += 1
-                else:
-                    numero_ordem = f"OC-{seq_oc:04d}"
-                    seq_oc += 1
-
-                ordem_gerada = {
-                    "numero": numero_ordem,
-                    "tipo": tipo_ordem,
-                    "item": cod,
-                    "quantidade": rec_plan[idx],
-                    "semana_liberacao": sem_liberacao,
-                    "semana_entrega": semana_atual,
-                    "status": status_ordem,
-                }
-                novas_ordens.append(ordem_gerada)
-
-                if status_ordem == "ATRASADA":
-                    mensagens_excecao.append(
-                        f"EXCECAO [RN07]: {numero_ordem} ({cod}) com liberacao na "
-                        f"S{sem_liberacao} (antes da S1) para entrega na S{semana_atual}."
-                    )
-
-                idx_demanda_filho = 0 if sem_liberacao < 1 else sem_liberacao - 1
-                if idx_demanda_filho < 8:
-                    for filho in estrutura.get(cod, []):
-                        comp = filho["componente"]
-                        qtd_por_un = float(filho["quantidade"])
-                        necessidade_bruta[comp][idx_demanda_filho] += (
-                            rec_plan[idx] * qtd_por_un
-                        )
-
-        registros_mrp[cod] = {
-            "codigo": cod,
-            "descricao": item["descricao"],
-            "tipo": tipo,
-            "lead_time": lead_time,
-            "estoque_seguranca": est_seg,
-            "lote_minimo": lote_min,
-            "estoque_inicial": estoque_inicial,
-            "necessidade_bruta": nb,
-            "recebimentos_programados": rp,
-            "estoque_projetado": ep,
-            "necessidade_liquida": nl,
-            "recebimentos_planejados": rec_plan,
-            "liberacoes_planejadas": lib_plan,
-        }
-
-    todas_ordens = ordens_mantidas + novas_ordens
-    if salvar_ordens:
-        salvar_json("ordens", todas_ordens)
-
-    return registros_mrp, todas_ordens, mensagens_excecao
+    dados["mrp"] = {"executado_em": data_execucao, "registros": registros,
+                    "mensagens": mensagens}
+    return {"apagadas": apagadas, "criadas": criadas, "mensagens": mensagens}
 
 
-def exibir_registro_item_mrp(registro: dict) -> None:
-    print(f"\nREGISTRO MRP - {registro['codigo']} {registro['descricao']}")
-    print(
-        f"Lead time: {registro['lead_time']} sem | "
-        f"Est. seguranca: {registro['estoque_seguranca']:g} | "
-        f"Lote min.: {registro['lote_minimo']:g} | "
-        f"Estoque: {registro['estoque_inicial']:g}"
-    )
+def mrp_executado(dados):
+    """Indica se existe um resultado de MRP calculado."""
+    return bool(dados.get("mrp", {}).get("registros"))
 
-    cab_semanas = " ".join([f"{s:>6}" for s in range(1, 9)])
-    print(f"{'Semana':<22} {cab_semanas}")
-    print("-" * 78)
 
-    linhas = [
-        ("Necessidade bruta", registro["necessidade_bruta"]),
-        ("Receb. programados", registro["recebimentos_programados"]),
-        ("Estoque projetado", registro["estoque_projetado"]),
-        ("Necessidade liquida", registro["necessidade_liquida"]),
-        ("Receb. planejados", registro["recebimentos_planejados"]),
-        ("Liberacao planejada", registro["liberacoes_planejadas"]),
+def obter_registro(dados, codigo):
+    """Registro MRP de um item (exige MRP ja executado)."""
+    item = obter_item(dados, codigo)
+    if not mrp_executado(dados):
+        raise ErroNegocio("o MRP ainda nao foi executado. Execute-o antes de "
+                          "consultar um registro.")
+    registro = dados["mrp"]["registros"].get(item["codigo"])
+    if registro is None:
+        raise ErroNegocio(
+            f"{item['codigo']} nao consta na ultima execucao do MRP "
+            "(item cadastrado depois). Execute o MRP novamente.")
+    return registro
+
+
+def formatar_registro(dados, codigo):
+    """Texto do registro MRP de um item (mockup 6.4)."""
+    item = obter_item(dados, codigo)
+    registro = obter_registro(dados, codigo)
+    saida = [
+        f"REGISTRO MRP - {item['codigo']} {item['descricao']}",
+        f"Lead time: {item['lead_time']} sem | "
+        f"Est. seguranca: {formatar_numero(item['estoque_seguranca'])} | "
+        f"Lote min.: {formatar_numero(item['lote_minimo'])} | "
+        f"Estoque: {formatar_numero(registro['estoque_inicial'])}",
+        f"(MRP executado em {formatar_data(dados['mrp']['executado_em'])})",
+        "",
     ]
+    cabecalho = ["Semana"] + [str(s) for s in range(1, HORIZONTE + 1)]
+    rotulos = (
+        ("Necessidade bruta", "nb"),
+        ("Receb. programados", "rp"),
+        ("Estoque projetado", "ep"),
+        ("Necessidade liquida", "nl"),
+        ("Receb. planejados", "rpl"),
+        ("Liberacao planejada", "lib"),
+    )
+    linhas = [[rotulo] + [formatar_numero(v) for v in registro[chave]]
+              for rotulo, chave in rotulos]
+    saida.extend(montar_tabela(cabecalho, linhas, "<" + ">" * HORIZONTE))
+    return saida
 
-    for rotulo, valores in linhas:
-        vals_fmt = " ".join([f"{v:>6g}" for v in valores])
-        print(f"{rotulo:<22} {vals_fmt}")
 
-
-def executar_e_exibir_mrp() -> None:
-    registros, ordens, excecoes = calcular_mrp(salvar_ordens=True)
-
-    planejadas = [o for o in ordens if o["status"] in ("PLANEJADA", "ATRASADA")]
-    print(f"\nMRP executado com sucesso em {obter_data_atual()}!")
-    print(f"Total de ordens planejadas/atrasadas geradas: {len(planejadas)}")
-
-    if excecoes:
-        print(f"\n{len(excecoes)} mensagens de excecao:")
-        for msg in excecoes:
-            print(f"  - {msg}")
-
-    while True:
-        cod = input(
-            "\nCódigo do item para ver registro MRP (ou Enter para voltar): "
-        ).strip().upper()
-        if not cod:
-            break
-        if cod not in registros:
-            print("ERRO: Item não encontrado.")
-            continue
-        exibir_registro_item_mrp(registros[cod])
+def formatar_resumo(resumo, data_execucao):
+    """Texto de ordens planejadas e mensagens de excecao (mockup 6.5)."""
+    saida = [f"ORDENS PLANEJADAS - execucao do MRP em "
+             f"{formatar_data(data_execucao)}"]
+    saida.extend(ordens.formatar_ordens(resumo["criadas"]))
+    saida.append("")
+    quantidade = len(resumo["mensagens"])
+    if quantidade:
+        rotulo = "mensagem" if quantidade == 1 else "mensagens"
+        saida.append(f"{quantidade} {rotulo} de excecao: ordens com "
+                     "liberacao antes da semana 1.")
+        saida.extend(f"  ! {mensagem}" for mensagem in resumo["mensagens"])
+    else:
+        saida.append("Nenhuma mensagem de excecao.")
+    return saida

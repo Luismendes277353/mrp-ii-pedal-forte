@@ -1,151 +1,194 @@
-import re
-from persistencia import carregar_json, salvar_json
-from utils import ler_float_positivo, ler_texto_nao_vazio
+"""Centros de trabalho, roteiros e carga x capacidade - CRP (RF06, RF12).
+
+* ``dados["centros"]``  -> ``{"CT-03": {"codigo", "descricao",
+  "capacidade", "custo_hora"}}`` (capacidade em horas/semana)
+* ``dados["roteiros"]`` -> ``{"SA-020": {"centro": "CT-02",
+  "tempo_unitario": 0.8}}`` (roteiro de operacao unica, horas/unidade)
+"""
+
+from itens import eh_fabricado, listar_itens, obter_item
+from ordens import ENCERRADA
+from utils import (
+    HORIZONTE,
+    ErroNegocio,
+    arredondar,
+    formatar_decimal,
+    formatar_moeda,
+    formatar_numero,
+    montar_tabela,
+    validar_codigo_centro,
+    validar_numero,
+)
 
 
-def cadastrar_centro_trabalho() -> None:
-    centros = carregar_json("centros")
+def obter_centro(dados, codigo):
+    """Busca um centro de trabalho ou levanta ErroNegocio."""
+    codigo = str(codigo).strip().upper()
+    try:
+        return dados["centros"][codigo]
+    except KeyError:
+        raise ErroNegocio(
+            f"centro de trabalho {codigo} nao cadastrado.") from None
 
-    while True:
-        codigo = input("Código do centro (ex.: CT-04): ").strip().upper()
-        if re.match(r"^CT-\d{2}$", codigo):
-            break
-        print("ERRO: Use o formato CT-00 (ex.: CT-01).")
 
-    descricao = ler_texto_nao_vazio("Descrição do centro de trabalho: ")
-    capacidade = ler_float_positivo("Capacidade disponível (horas/semana): ")
-    custo_hora = ler_float_positivo("Custo-hora de mão de obra (R$/h): ")
+def _validar_centro(descricao, capacidade, custo_hora):
+    descricao = str(descricao).strip()
+    if not descricao:
+        raise ErroNegocio("a descricao do centro e obrigatoria.")
+    validar_numero(capacidade, "A capacidade", maior_que=0)
+    validar_numero(custo_hora, "O custo-hora", minimo=0)
+    return descricao, arredondar(capacidade), arredondar(custo_hora)
 
-    centros[codigo] = {
-        "descricao": descricao,
-        "capacidade_semanal": capacidade,
-        "custo_hora": custo_hora,
+
+def cadastrar_centro(dados, codigo, descricao, capacidade, custo_hora):
+    """Cadastra um centro de trabalho (capacidade em horas/semana)."""
+    codigo = validar_codigo_centro(codigo)
+    if codigo in dados["centros"]:
+        raise ErroNegocio(f"ja existe o centro de trabalho {codigo}.")
+    descricao, capacidade, custo_hora = _validar_centro(
+        descricao, capacidade, custo_hora)
+    centro = {"codigo": codigo, "descricao": descricao,
+              "capacidade": capacidade, "custo_hora": custo_hora}
+    dados["centros"][codigo] = centro
+    return centro
+
+
+def alterar_centro(dados, codigo, descricao, capacidade, custo_hora):
+    """Altera os dados de um centro de trabalho existente."""
+    centro = obter_centro(dados, codigo)
+    descricao, capacidade, custo_hora = _validar_centro(
+        descricao, capacidade, custo_hora)
+    centro.update({"descricao": descricao, "capacidade": capacidade,
+                   "custo_hora": custo_hora})
+    return centro
+
+
+def formatar_centros(dados):
+    """Tabela dos centros de trabalho."""
+    if not dados["centros"]:
+        return ["Nenhum centro de trabalho cadastrado."]
+    linhas = [
+        (c["codigo"], c["descricao"], formatar_numero(c["capacidade"]),
+         formatar_moeda(c["custo_hora"]))
+        for c in sorted(dados["centros"].values(), key=lambda c: c["codigo"])
+    ]
+    return montar_tabela(("Codigo", "Descricao", "Capac.(h/sem)",
+                          "Custo-hora (R$)"), linhas, "<<>>")
+
+
+def definir_roteiro(dados, codigo_item, codigo_centro, tempo_unitario):
+    """Define o centro que produz o item e o tempo por unidade (RF06)."""
+    item = obter_item(dados, codigo_item)
+    if not eh_fabricado(item):
+        raise ErroNegocio(
+            f"{item['codigo']} e materia-prima: apenas itens fabricados "
+            "(PA/SA) possuem roteiro.")
+    centro = obter_centro(dados, codigo_centro)
+    validar_numero(tempo_unitario, "O tempo por unidade", maior_que=0)
+    dados["roteiros"][item["codigo"]] = {
+        "centro": centro["codigo"],
+        "tempo_unitario": arredondar(tempo_unitario),
     }
-    salvar_json("centros", centros)
-    print(f"Centro {codigo} - {descricao} salvo com sucesso!")
 
 
-def listar_centros_trabalho() -> None:
-    centros = carregar_json("centros")
-    if not centros:
-        print("Nenhum centro de trabalho cadastrado.")
-        return
-
-    print("\n" + "=" * 72)
-    print(f"{'CENTRO':<8} {'DESCRIÇÃO':<32} {'CAPAC. (h/sem)':>15} {'CUSTO/H (R$)':>14}")
-    print("-" * 72)
-    for cod in sorted(centros.keys()):
-        ct = centros[cod]
-        print(
-            f"{cod:<8} {ct['descricao']:<32} "
-            f"{ct['capacidade_semanal']:>15.1f} {ct['custo_hora']:>14.2f}"
-        )
-    print("=" * 72)
+def obter_roteiro(dados, codigo_item):
+    """Roteiro do item ou None se nao houver."""
+    return dados["roteiros"].get(codigo_item)
 
 
-def cadastrar_roteiro() -> None:
-    itens = carregar_json("itens")
-    centros = carregar_json("centros")
-    roteiros = carregar_json("roteiros")
-
-    item_cod = input("Código do item fabricado (PA ou SA): ").strip().upper()
-    if item_cod not in itens:
-        print("ERRO: Item não encontrado.")
-        return
-    if itens[item_cod]["tipo"] == "MP":
-        print("ERRO [RN01]: Matéria-prima (MP) é comprada e não possui roteiro de fabricação.")
-        return
-
-    centro_cod = input("Código do centro de trabalho (ex.: CT-03): ").strip().upper()
-    if centro_cod not in centros:
-        print("ERRO: Centro de trabalho não encontrado.")
-        return
-
-    tempo = ler_float_positivo("Tempo de fabricação por unidade (em horas, ex.: 0.5): ")
-
-    roteiros[item_cod] = {"centro": centro_cod, "tempo_unitario": tempo}
-    salvar_json("roteiros", roteiros)
-    print(f"Roteiro de {item_cod} vinculado ao centro {centro_cod} ({tempo} h/un).")
+def itens_fabricados_sem_roteiro(dados):
+    """Codigos de itens PA/SA que ainda nao tem roteiro."""
+    return [i["codigo"] for i in listar_itens(dados)
+            if eh_fabricado(i) and i["codigo"] not in dados["roteiros"]]
 
 
-def listar_roteiros() -> None:
-    roteiros = carregar_json("roteiros")
-    itens = carregar_json("itens")
-    centros = carregar_json("centros")
-
-    if not roteiros:
-        print("Nenhum roteiro cadastrado.")
-        return
-
-    print("\n" + "=" * 76)
-    print(f"{'ITEM':<8} {'DESCRIÇÃO':<28} {'CENTRO':<8} {'DESCRIÇÃO CT':<20} {'TEMPO(h)':>9}")
-    print("-" * 76)
-    for item_cod in sorted(roteiros.keys()):
-        rot = roteiros[item_cod]
-        desc_item = itens.get(item_cod, {}).get("descricao", "N/A")
-        desc_ct = centros.get(rot["centro"], {}).get("descricao", "N/A")
-        print(
-            f"{item_cod:<8} {desc_item:<28} {rot['centro']:<8} "
-            f"{desc_ct:<20} {rot['tempo_unitario']:>9.2f}"
-        )
-    print("=" * 76)
+def formatar_roteiros(dados):
+    """Tabela dos roteiros cadastrados."""
+    if not dados["roteiros"]:
+        return ["Nenhum roteiro cadastrado."]
+    linhas = []
+    for item in listar_itens(dados):
+        roteiro = dados["roteiros"].get(item["codigo"])
+        if roteiro:
+            linhas.append((item["codigo"], item["descricao"],
+                           roteiro["centro"],
+                           formatar_numero(roteiro["tempo_unitario"])))
+    return montar_tabela(("Item", "Descricao", "Centro", "Horas/un"),
+                         linhas, "<<<>")
 
 
-def calcular_carga_semanal_centro(codigo_centro: str) -> dict[int, float]:
-    ordens = carregar_json("ordens", padrao=[])
-    roteiros = carregar_json("roteiros")
+def calcular_carga(dados):
+    """Carga semanal (horas) de cada centro (RN09).
 
-    carga = {semana: 0.0 for semana in range(1, 9)}
-
-    for ordem in ordens:
-        if ordem["tipo"] != "OP" or ordem["status"] != "LIBERADA":
+    Soma, para cada OP nao encerrada com liberacao dentro do horizonte,
+    ``quantidade x tempo unitario`` na semana de liberacao da ordem.
+    Retorna ``{centro: [carga_s1, ..., carga_s8]}``.
+    """
+    carga = {codigo: [0.0] * HORIZONTE for codigo in dados["centros"]}
+    for ordem in dados["ordens"]:
+        if ordem["tipo"] != "OP" or ordem["status"] == ENCERRADA:
             continue
-
-        item_cod = ordem["item"]
-        roteiro = roteiros.get(item_cod)
-        if not roteiro or roteiro["centro"] != codigo_centro:
-            continue
-
+        roteiro = dados["roteiros"].get(ordem["item"])
         semana = ordem["semana_liberacao"]
-        # Caso a OP liberada tenha sido planejada para S0 (atrasada), aloca na S1
-        semana_efetiva = 1 if semana < 1 else semana
-        if 1 <= semana_efetiva <= 8:
-            carga[semana_efetiva] += ordem["quantidade"] * roteiro["tempo_unitario"]
+        if roteiro is None or not 1 <= semana <= HORIZONTE:
+            continue
+        horas = ordem["quantidade"] * roteiro["tempo_unitario"]
+        carga.setdefault(roteiro["centro"], [0.0] * HORIZONTE)
+        carga[roteiro["centro"]][semana - 1] += horas
+    return {c: [arredondar(h) for h in horas] for c, horas in carga.items()}
 
-    return carga
+
+def analisar_centro(dados, codigo_centro):
+    """Linhas do CRP de um centro: semana, carga, uso (%) e sobrecarga."""
+    centro = obter_centro(dados, codigo_centro)
+    carga = calcular_carga(dados).get(centro["codigo"], [0.0] * HORIZONTE)
+    capacidade = centro["capacidade"]
+    linhas = []
+    for semana, horas in enumerate(carga, start=1):
+        linhas.append({
+            "semana": semana,
+            "carga": horas,
+            "capacidade": capacidade,
+            "uso": horas / capacidade * 100,
+            "sobrecarga": horas > capacidade + 1e-9,
+        })
+    return linhas
 
 
-def exibir_crp() -> None:
-    centros = carregar_json("centros")
-    if not centros:
-        print("Nenhum centro de trabalho cadastrado.")
-        return
+def semanas_em_sobrecarga(dados, codigo_centro):
+    """Semanas (1..8) em que a carga supera a capacidade do centro."""
+    return [linha["semana"]
+            for linha in analisar_centro(dados, codigo_centro)
+            if linha["sobrecarga"]]
 
-    listar_centros_trabalho()
-    codigo = input("Código do centro para análise CRP (ex.: CT-03): ").strip().upper()
-    if codigo not in centros:
-        print("ERRO: Centro de trabalho não encontrado.")
-        return
 
-    ct = centros[codigo]
-    capacidade = ct["capacidade_semanal"]
-    carga_semanal = calcular_carga_semanal_centro(codigo)
+def _lista_semanas(semanas):
+    textos = [str(s) for s in semanas]
+    if len(textos) == 1:
+        return textos[0]
+    return ", ".join(textos[:-1]) + " e " + textos[-1]
 
-    print(f"\nCARGA x CAPACIDADE - {codigo} {ct['descricao']} ({capacidade:.1f} h/semana)")
-    print(f"{'Sem':<4} {'Carga(h)':>9} {'Uso(%)':>7}  {'Gráfico'}")
 
-    semanas_sobrecarga = []
-    for sem in range(1, 9):
-        carga = carga_semanal[sem]
-        uso_pct = (carga / capacidade * 100.0) if capacidade > 0 else 0.0
-        blocos = "#" * int(round(uso_pct / 10.0))
-        alerta = " SOBRECARGA" if carga > capacidade else ""
-        if alerta:
-            semanas_sobrecarga.append(str(sem))
-        print(f"{sem:<4} {carga:>9.1f} {uso_pct:>6.0f}%  {blocos}{alerta}")
-
-    if semanas_sobrecarga:
-        lista_sem = " e ".join(semanas_sobrecarga)
-        print(f"\nSugestao: antecipar OPs ou programar hora extra nas semanas {lista_sem}.")
+def formatar_crp(dados, codigo_centro):
+    """Texto do CRP de um centro de trabalho (carga x capacidade)."""
+    centro = obter_centro(dados, codigo_centro)
+    saida = [f"CARGA x CAPACIDADE - {centro['codigo']} "
+             f"{centro['descricao']} "
+             f"({formatar_decimal(centro['capacidade'])} h/semana)"]
+    linhas = []
+    for linha in analisar_centro(dados, centro["codigo"]):
+        uso = round(linha["uso"])
+        barras = "#" * round(linha["uso"] / 10)
+        aviso = "SOBRECARGA" if linha["sobrecarga"] else ""
+        linhas.append((linha["semana"], formatar_decimal(linha["carga"]),
+                       uso, f"{barras:<12} {aviso}".rstrip()))
+    saida.extend(montar_tabela(("Sem", "Carga(h)", "Uso(%)", ""), linhas,
+                               ">>><"))
+    criticas = semanas_em_sobrecarga(dados, centro["codigo"])
+    if criticas:
+        artigo = "na semana" if len(criticas) == 1 else "nas semanas"
+        saida.append(f"Sugestao: antecipar OPs ou programar hora extra "
+                     f"{artigo} {_lista_semanas(criticas)}.")
     else:
-        print("\nCapacidade dentro do limite em todas as 8 semanas.")
+        saida.append("Nenhuma semana em sobrecarga.")
+    return saida
