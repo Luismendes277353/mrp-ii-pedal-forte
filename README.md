@@ -6,7 +6,7 @@ Sistema de Planejamento dos Recursos de Manufatura (MRP II) em Python para a fá
 
 - **Documentação completa** (execução, uso, requisitos, decisões de projeto): [MRP2_PedalForte/docs/README.md](MRP2_PedalForte/docs/README.md)
 - **Vídeo 1 (sistema em funcionamento):** https://youtu.be/MstmdFY91y0
-- **Vídeo 2 (código, arquitetura e decisões):** [INSERIR AQUI O LINK DO VÍDEO 2]
+- **Vídeo 2 (código, arquitetura e decisões):** https://youtu.be/BzUWqiOW7iM
 
 ## Execução rápida
 
