@@ -158,15 +158,5 @@
     "lead_time": 2,
     "estoque_seguranca": 10.0,
     "lote_minimo": 30.0
-  },
-  "MP-400": {
-    "codigo": "MP-400",
-    "tipo": "MP",
-    "descricao": "Parafuso M8",
-    "unidade": "un",
-    "custo_unitario": 1.5,
-    "lead_time": 1,
-    "estoque_seguranca": 0.0,
-    "lote_minimo": 0.0
   }
 }
