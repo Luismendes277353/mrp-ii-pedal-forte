@@ -10,7 +10,7 @@ Sistema de Planejamento dos Recursos de Manufatura (MRP II) em Python para a fá
 | **Disciplina** | Programação em Python |
 | **Professor** | Guido Pantuza |
 | **Trabalho** | 2º - Sistema MRP II |
-| **Repositório** | [INSERIR AQUI O LINK DO REPOSITÓRIO NO GITHUB] |
+| **Repositório** | https://github.com/Luismendes277353/mrp-ii-pedal-forte |
 | **Vídeo 1 (sistema em funcionamento)** | https://youtu.be/MstmdFY91y0 |
 | **Vídeo 2 (código, arquitetura e decisões)** | https://youtu.be/BzUWqiOW7iM |
 
@@ -24,8 +24,8 @@ Sistema de Planejamento dos Recursos de Manufatura (MRP II) em Python para a fá
 - Ambiente em que o sistema foi validado: Windows, Python 3.14.7.
 
 ```bash
-git clone [INSERIR AQUI O LINK DO REPOSITÓRIO NO GITHUB]
-cd [INSERIR AQUI O NOME DA PASTA DO REPOSITÓRIO]/MRP2_PedalForte
+git clone https://github.com/Luismendes277353/mrp-ii-pedal-forte.git
+cd mrp-ii-pedal-forte/MRP2_PedalForte
 pip install -r requirements.txt
 ```
 
